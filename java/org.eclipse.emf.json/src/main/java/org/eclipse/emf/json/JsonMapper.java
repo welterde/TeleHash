@@ -114,10 +114,10 @@ public final class JsonMapper {
 			return jp.getText();
 		}
 		else if (nextToken == JsonToken.VALUE_NUMBER_INT) {
-			return jp.getIntValue();
+			return jp.getNumberValue();
 		}
 		else if (nextToken == JsonToken.VALUE_NUMBER_FLOAT) {
-			return jp.getFloatValue();
+			return jp.getDoubleValue();
 		}
 		else if (nextToken == JsonToken.START_OBJECT) {
 			return jp.readValueAs(Map.class);
