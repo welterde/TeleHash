@@ -22,26 +22,23 @@ instance Show Endpoint where
 
 data RecvMsg = RecvMsg JSValue Int SockAddr
 
-data HeaderKey = To | Ring | Line | BytesReceived | Hop | HeaderKey String
+data TelexKey = To | Ring | Line | BytesReceived | Hop | Header String
+              | See | Tap | Command String
+              | End | Pop | Self | Sig | Href | From | Etag | Cht | Signal String
+              | Telex String
 
-instance Show HeaderKey where
+instance Show TelexKey where
     show To = "_to"
     show Ring = "_ring"
     show Line = "_line"
     show BytesReceived = "_br"
     show Hop = "_hop"
-    show (HeaderKey header) = "." ++ header
+    show (Header header) = "." ++ header
     
-data CommandKey = See | Tap | CommandKey String
-
-instance Show CommandKey where
     show See = ".see"
     show Tap = ".tap"
-    show (CommandKey command) = "." ++ command
+    show (Command command) = "." ++ command
     
-data SignalKey = End | Pop | Self | Sig | Href | From | Etag | Cht | SignalKey String
-
-instance Show SignalKey where
     show End = "+end"
     show Pop = "+pop"
     show Self = "+self"
@@ -50,20 +47,17 @@ instance Show SignalKey where
     show From = "+from"
     show Etag = "+etag"
     show Cht = "+cht"
-    show (SignalKey signal) = "+" ++ signal
-
-data TelexKey = Telex String 
-           | Header HeaderKey 
-           | Command CommandKey 
-           | Signal SignalKey
-
-instance Show TelexKey where
-    show (Telex telex) = telex
+    show (Signal signal) = "+" ++ signal
+    
+    show (Telex key) = key
 
 bshow = B.pack . show
 
 telexGet :: JSON a => TelexKey -> JSValue -> Maybe a
-telexGet key value = J.lookup (bshow key) value
+telexGet key telex = J.lookup (bshow key) telex
+
+telexWith :: JSON a => TelexKey -> a -> JSValue -> JSValue
+telexWith key value telex = J.updateField (bshow key) value telex
 
 quickSockAddr:: String -> Int -> IO SockAddr
 quickSockAddr hostName port = liftM addrAddress $ quickAddrInfo hostName port

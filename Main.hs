@@ -17,7 +17,7 @@ printRecvMsg logChan = do
         ++ "][" ++ (show msgLen) ++ "] " ++ (show msg)
     
     putStrLn $ "_to = " ++ 
-        case telexGet (Header To) msg of
+        case telexGet To msg of
             (Just to) -> to
             Nothing -> "[undefined]"
 
