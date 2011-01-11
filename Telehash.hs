@@ -1,3 +1,4 @@
+{-# language PackageImports #-}
 
 module Telehash where
 
@@ -15,6 +16,8 @@ import Network.BSD
 
 import Text.JSON.AttoJSON as J
 
+import Data.Digest.Pure.SHA
+
 data Endpoint = Endpoint String Int
 
 instance Show Endpoint where
@@ -26,6 +29,25 @@ data TelexKey = To | Ring | Line | BytesReceived | Hop | Header String
               | See | Tap | Command String
               | End | Pop | Self | Sig | Href | From | Etag | Cht | Signal String
               | Telex String
+
+data SwitchStatus = Offline | Booting | Online
+
+data LineInfo = LineInfo {
+    
+    lnEndP          :: Endpoint,
+    lnEndH          :: Digest,
+    lnBytesReceived :: Int,
+    lnRingIn        :: Int,
+    lnRingOut       :: Int
+    
+}
+
+data SwitchInfo = SwitchInfo {
+    
+    swStat  :: SwitchStatus,
+    swLines :: Map Endpoint LineInfo
+    
+}
 
 instance Show TelexKey where
     show To = "_to"
@@ -106,10 +128,8 @@ sendMessage socket hostName port msg = do
     
     return ()
 
-
 --reactor :: TChan RecvMsg -> Socket -> IO ()
 --    (RecvMsg msg msgLen sockAddr) <- atomically $ readTChan logChan
-    
 
 -----------------------------------------------------------------------------
                           -- Telehash switch design --
