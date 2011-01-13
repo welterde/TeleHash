@@ -33,5 +33,7 @@ main = do
         (B.pack 
             "{'+end':'24fc702463e195f3c94aaa5e33a806955fab3b36', '_to':'208.68.163.247:42424'}")
     
+    startSwitch msgChan serverSocket
+    
     forever $ printRecvMsg logChan
     
