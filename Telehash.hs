@@ -49,12 +49,6 @@ parseEndpoint = do
 
 data RecvMsg = RecvMsg JSValue Int SockAddr
 
-data TelexKey = To | Ring | Line | BytesReceived | Hop | Header String
-              | See | Tap | Command String
-              | End | Pop | Self | Sig | Href | From | Etag | Cht | Signal String
-              | Telex String
-    deriving (Read)
-
 data SwitchStatus = Offline | Booting | Online | Shutdown
 
 data LineInfo = LineInfo {
@@ -86,30 +80,6 @@ instance Hashable B.ByteString where
 
 instance Hashable Endpoint where
     hash s = sha1 $ LUTF8.fromString $ show s
-
-instance Show TelexKey where
-    show To = "_to"
-    show Ring = "_ring"
-    show Line = "_line"
-    show BytesReceived = "_br"
-    show Hop = "_hop"
-    show (Header header) = "." ++ header
-    
-    show See = ".see"
-    show Tap = ".tap"
-    show (Command command) = "." ++ command
-    
-    show End = "+end"
-    show Pop = "+pop"
-    show Self = "+self"
-    show Sig = "+sig"
-    show Href = "+href"
-    show From = "+from"
-    show Etag = "+etag"
-    show Cht = "+cht"
-    show (Signal signal) = "+" ++ signal
-    
-    show (Telex key) = key
 
 telexGet :: JSON a => String -> JSValue -> Maybe a
 telexGet key telex = 
