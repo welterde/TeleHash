@@ -1,6 +1,8 @@
-{-# language PackageImports #-}
+{-# language PackageImports, TypeSynonymInstances #-}
 
 module Telehash where
+
+--import Debug.Trace
 
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -9,20 +11,41 @@ import Control.Monad
 import Data.Bits
 import Data.List
 import Data.Map as M
-import qualified Data.ByteString.Char8 as B
 
+import Data.ByteString.UTF8 as UTF8
+import Data.ByteString.Lazy.UTF8 as LUTF8
+
+import Data.Digest.Pure.SHA
+
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
+ 
 import Network.Socket hiding (recv, recvFrom, send, sendTo)
-import "network" Network.Socket.ByteString (recvFrom, sendTo)
+import Network.Socket.ByteString (recvFrom, sendTo)
 import Network.BSD
 
 import Text.JSON.AttoJSON as J
 
-import Data.Digest.Pure.SHA
+import Text.ParserCombinators.Parsec
 
 data Endpoint = Endpoint String Int
 
 instance Show Endpoint where
     show (Endpoint ipAddr port) = ipAddr ++ ":" ++ (show port)
+
+readEndpoint :: String -> Maybe Endpoint
+readEndpoint s = 
+    case parse parseEndpoint "" s of
+        Left error ->
+            Nothing
+        Right endpoint ->
+            Just endpoint
+
+parseEndpoint = do
+    hostName <- many1 $ digit <|> char '.'
+    char ':'
+    port <- many1 digit
+    return $ Endpoint hostName (read port)
 
 data RecvMsg = RecvMsg JSValue Int SockAddr
 
@@ -30,6 +53,7 @@ data TelexKey = To | Ring | Line | BytesReceived | Hop | Header String
               | See | Tap | Command String
               | End | Pop | Self | Sig | Href | From | Etag | Cht | Signal String
               | Telex String
+    deriving (Read)
 
 data SwitchStatus = Offline | Booting | Online | Shutdown
 
@@ -46,9 +70,22 @@ data LineInfo = LineInfo {
 data SwitchInfo = SwitchInfo {
     
     swStat  :: SwitchStatus,
-    swLines :: M.Map Endpoint LineInfo
+    swLines :: M.Map Endpoint LineInfo,
+    swSocket :: Socket
     
 }
+
+class Hashable a where
+    hash :: a -> Digest
+
+instance Hashable String where
+    hash s = sha1 $ LUTF8.fromString s
+
+instance Hashable B.ByteString where
+    hash s = sha1 $ BL.pack $ B.unpack s
+
+instance Hashable Endpoint where
+    hash s = sha1 $ LUTF8.fromString $ show s
 
 instance Show TelexKey where
     show To = "_to"
@@ -74,16 +111,17 @@ instance Show TelexKey where
     
     show (Telex key) = key
 
-bshow = B.pack . show
+telexGet :: JSON a => String -> JSValue -> Maybe a
+telexGet key telex = 
+    J.lookup (UTF8.fromString key) telex
 
-telexGet :: JSON a => TelexKey -> JSValue -> Maybe a
-telexGet key telex = J.lookup (bshow key) telex
-
-telexWith :: JSON a => TelexKey -> a -> JSValue -> JSValue
-telexWith key value telex = J.updateField (bshow key) value telex
+telexWith :: JSON a => String -> a -> JSValue -> JSValue
+telexWith key value telex = 
+    J.updateField (UTF8.fromString key) value telex
 
 quickSockAddr:: String -> Int -> IO SockAddr
-quickSockAddr hostName port = liftM addrAddress $ quickAddrInfo hostName port
+quickSockAddr hostName port = 
+    liftM addrAddress $ quickAddrInfo hostName port
 
 quickAddrInfo :: String -> Int -> IO AddrInfo
 quickAddrInfo hostName port = do
@@ -116,10 +154,20 @@ fetchMessage msgChan sock = do
             atomically $ writeTChan msgChan $ 
                 RecvMsg msg (B.length msgRaw) addr
         Nothing ->
-            return ()
-    
-sendMessage :: Socket -> String -> Int -> B.ByteString -> IO ()
-sendMessage socket hostName port msg = do
+            error "fetch failed"
+
+sendMessage :: Socket -> B.ByteString -> IO ()
+sendMessage socket msg = do
+    let maybeEndpoint = 
+            readJSON msg >>= telexGet "_to" >>= readEndpoint
+    case maybeEndpoint of
+        Just endpoint ->
+            sendMessageTo socket msg endpoint
+        Nothing ->
+            error "send failed"
+
+sendMessageTo :: Socket -> B.ByteString -> Endpoint -> IO ()
+sendMessageTo socket msg (Endpoint hostName port) = do
     hostAddr <- quickSockAddr hostName port
     
     bytesSent <- sendTo socket msg hostAddr
@@ -133,19 +181,22 @@ startSwitch :: TChan RecvMsg -> Socket -> IO ThreadId
 startSwitch msgChan socket = do
     let state = SwitchInfo { 
         swStat  = Offline,
-        swLines = M.empty
+        swLines = M.empty,
+        swSocket = socket
     }
     
     swVar <- atomically $ newTVar (state :: SwitchInfo)
     
-    forkIO $ runSwitch swVar msgChan socket
+    forkIO $ runSwitch swVar msgChan
 
-runSwitch :: TVar SwitchInfo -> TChan RecvMsg -> Socket -> IO ()
-runSwitch swVar msgChan socket = do
+runSwitch :: TVar SwitchInfo -> TChan RecvMsg -> IO ()
+runSwitch swVar msgChan = do
     state <- atomically $ readTVar swVar
     
     telex <- case swStat state of
         Shutdown -> do
+            return Nothing
+        Offline -> do
             return Nothing
         _ -> do
             result <- atomically $ readTChan msgChan
@@ -155,7 +206,7 @@ runSwitch swVar msgChan socket = do
         Offline -> do
             -- Send telex to bootstrap endpoint
             -- (unless of course, we're standalone)
-            startBootstrap state telex
+            startBootstrap state
         
         Booting -> do
             completeBootstrap state telex
@@ -168,15 +219,24 @@ runSwitch swVar msgChan socket = do
             return state
         
     case swStat newState of
-        Shutdown ->
+        Shutdown -> do
             return ()
         _ -> do
             atomically $ writeTVar swVar newState
-            runSwitch swVar msgChan socket
+            runSwitch swVar msgChan
 
-startBootstrap :: SwitchInfo -> Maybe RecvMsg -> IO SwitchInfo
-startBootstrap state telex = do
-    return state
+startBootstrap :: SwitchInfo -> IO SwitchInfo
+startBootstrap state = do
+    let endpoint = Endpoint "127.0.0.1" 42424
+    sendMessage (swSocket state) $
+        showJSON $ toJSON [
+            ("+end", show $ hash endpoint),
+            ("_to", show endpoint)]
+    
+    return SwitchInfo { 
+        swStat=Booting, 
+        swLines=(swLines state), 
+        swSocket=(swSocket state)}
 
 completeBootstrap :: SwitchInfo -> Maybe RecvMsg -> IO SwitchInfo
 completeBootstrap state telex = do
