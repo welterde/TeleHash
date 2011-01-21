@@ -7,6 +7,8 @@ module Telehash where
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
+import Control.Monad.Reader
+import Control.Monad.State
 
 import Data.Bits
 import Data.List
@@ -61,13 +63,22 @@ data LineInfo = LineInfo {
     
 }
 
-data SwitchInfo = SwitchInfo {
+data SwitchConfig = SwitchConfig {
+    
+    swBootstrap :: Endpoint
+    
+}
+
+data SwitchState = SwitchState {
     
     swStat  :: SwitchStatus,
     swLines :: M.Map Endpoint LineInfo,
-    swSocket :: Socket
+    swSocket :: Socket,
+    swMsgChan :: TChan RecvMsg
     
 }
+
+type SwitchT = ReaderT SwitchConfig (StateT SwitchState IO)
 
 class Hashable a where
     hash :: a -> Digest
@@ -148,73 +159,71 @@ sendMessageTo socket msg (Endpoint hostName port) = do
     return ()
 
 startSwitch :: TChan RecvMsg -> Socket -> IO ThreadId
-startSwitch msgChan socket = do
-    let state = SwitchInfo { 
-        swStat  = Offline,
-        swLines = M.empty,
-        swSocket = socket
-    }
-    
-    swVar <- atomically $ newTVar (state :: SwitchInfo)
-    
-    forkIO $ runSwitch swVar msgChan
+startSwitch msgChan socket =
+    let state = SwitchState { 
+            swStat  = Offline,
+            swLines = M.empty,
+            swSocket = socket,
+            swMsgChan = msgChan
+        }
+        
+        config = SwitchConfig {
+            swBootstrap = Endpoint "127.0.0.1" 42424
+        }
+    in do
+        forkIO $ do
+            execStateT (runReaderT runSwitch config) state
+            return ()
 
-runSwitch :: TVar SwitchInfo -> TChan RecvMsg -> IO ()
-runSwitch swVar msgChan = do
-    state <- atomically $ readTVar swVar
+runSwitch :: SwitchT ()
+runSwitch = do
+    config <- ask
+    state <- get
     
-    telex <- case swStat state of
-        Shutdown -> do
-            return Nothing
-        Offline -> do
-            return Nothing
-        _ -> do
-            result <- atomically $ readTChan msgChan
-            return $ Just result
-    
-    newState <- case swStat state of
-        Offline -> do
-            -- Send telex to bootstrap endpoint
-            -- (unless of course, we're standalone)
-            startBootstrap state
-        
-        Booting -> do
-            completeBootstrap state telex
-            dispatchTelex state telex
-        
-        Online -> do
-            dispatchTelex state telex
-        
-        Shutdown -> do
-            return state
-        
-    case swStat newState of
+    case swStat state of
         Shutdown -> do
             return ()
+            
+        Offline -> do
+            startBootstrap
+            runSwitch
+            
         _ -> do
-            atomically $ writeTVar swVar newState
-            runSwitch swVar msgChan
+            telex <- liftIO $ atomically $ readTChan (swMsgChan state)
+            
+            case swStat state of
+                Booting -> do
+                    completeBootstrap telex
+                    dispatchTelex telex
+                
+                Online -> do
+                    dispatchTelex telex
+                
+                _ -> do
+                    return ()
+            
+            runSwitch
 
-startBootstrap :: SwitchInfo -> IO SwitchInfo
-startBootstrap state = do
-    let endpoint = Endpoint "127.0.0.1" 42424
-    sendMessage (swSocket state) $
+startBootstrap :: SwitchT ()
+startBootstrap = do
+    config <- ask
+    state <- get
+    
+    let endpoint = swBootstrap config
+    liftIO $ sendMessage (swSocket state) $
         showJSON $ toJSON [
             ("+end", show $ hash endpoint),
             ("_to", show endpoint)]
     
-    return SwitchInfo { 
-        swStat=Booting, 
-        swLines=(swLines state), 
-        swSocket=(swSocket state)}
+    put state { swStat=Booting }
 
-completeBootstrap :: SwitchInfo -> Maybe RecvMsg -> IO SwitchInfo
-completeBootstrap state telex = do
-    return state
+completeBootstrap :: RecvMsg -> SwitchT ()
+completeBootstrap telex = do
+    return ()
 
-dispatchTelex :: SwitchInfo -> Maybe RecvMsg -> IO SwitchInfo
-dispatchTelex state telex = do
-    return state
+dispatchTelex :: RecvMsg -> SwitchT ()
+dispatchTelex telex = do
+    return ()
 
 -----------------------------------------------------------------------------
                           -- Telehash switch design --
