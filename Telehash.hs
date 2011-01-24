@@ -12,7 +12,8 @@ import Control.Monad.State
 
 import Data.Bits
 import Data.List
-import Data.Map as M
+import qualified Data.Map as M
+import Data.Maybe
 
 import Data.ByteString.UTF8 as UTF8
 import Data.ByteString.Lazy.UTF8 as LUTF8
@@ -35,6 +36,10 @@ data Endpoint = Endpoint String Int
 instance Show Endpoint where
     show (Endpoint ipAddr port) = ipAddr ++ ":" ++ (show port)
 
+toEndpoint :: SockAddr -> Maybe Endpoint
+toEndpoint s = 
+    readEndpoint $ show s
+
 readEndpoint :: String -> Maybe Endpoint
 readEndpoint s = 
     case parse parseEndpoint "" s of
@@ -49,22 +54,38 @@ parseEndpoint = do
     port <- many1 digit
     return $ Endpoint hostName (read port)
 
-data RecvMsg = RecvMsg JSValue Int SockAddr
+data SwitchCommand = ProcessTelex {
+        
+        telexFrom :: Endpoint,
+        telexLength :: Int,
+        telexObj :: JSValue
+    }
+    | CheckLines
+    | ShutdownSwitch
 
 data SwitchStatus = Offline | Booting | Online | Shutdown
+    deriving (Show)
 
-data LineInfo = LineInfo {
+data SwitchHandle = SwitchHandle {
     
-    lnEndP          :: Endpoint,
-    lnEndH          :: Digest,
-    lnBytesReceived :: Int,
-    lnRingIn        :: Int,
-    lnRingOut       :: Int
+    swChan :: TChan SwitchCommand,
+    swThreads :: [ThreadId]
     
 }
 
+data LineInfo = LineInfo {
+        
+        lnEndP          :: Endpoint,
+        lnEndH          :: Digest,
+        lnBytesReceived :: Int,
+        lnRingIn        :: Int,
+        lnRingOut       :: Int
+        
+    }
+
 data SwitchConfig = SwitchConfig {
     
+    swAddress :: Endpoint,
     swBootstrap :: Endpoint
     
 }
@@ -72,9 +93,10 @@ data SwitchConfig = SwitchConfig {
 data SwitchState = SwitchState {
     
     swStat  :: SwitchStatus,
+    swPublic :: Maybe Endpoint,
     swLines :: M.Map Endpoint LineInfo,
     swSocket :: Socket,
-    swMsgChan :: TChan RecvMsg
+    swMsgChan :: TChan SwitchCommand
     
 }
 
@@ -126,14 +148,16 @@ bindServer (Endpoint hostName port) = do
 
 -- Listen for incoming messages.
 -- Dispatch those messages to the channel.
-fetchMessage :: TChan RecvMsg -> Socket -> IO () 
+fetchMessage :: TChan SwitchCommand -> Socket -> IO () 
 fetchMessage msgChan sock = do
     (msgRaw, addr) <- recvFrom sock 1024
-    let msg = readJSON msgRaw
-    case readJSON msgRaw of
-        Just msg ->
+    case (do
+            endpoint <- toEndpoint addr
+            msg <- readJSON msgRaw
+            return (endpoint, msg)) of
+        Just (endpoint, msg) ->
             atomically $ writeTChan msgChan $ 
-                RecvMsg msg (B.length msgRaw) addr
+                        ProcessTelex endpoint (B.length msgRaw) msg
         Nothing ->
             error "fetch failed"
 
@@ -158,27 +182,65 @@ sendMessageTo socket msg (Endpoint hostName port) = do
     
     return ()
 
-startSwitch :: TChan RecvMsg -> Socket -> IO ThreadId
-startSwitch msgChan socket =
-    let state = SwitchState { 
+startSwitch :: SwitchConfig -> IO SwitchHandle
+startSwitch config = do
+    socket <- bindServer $ swAddress config
+    msgChan <- newTChanIO
+    let state = SwitchState {
             swStat  = Offline,
             swLines = M.empty,
+            swPublic = Nothing,
             swSocket = socket,
             swMsgChan = msgChan
         }
-        
-        config = SwitchConfig {
-            swBootstrap = Endpoint "127.0.0.1" 42424
-        }
-    in do
-        forkIO $ do
-            execStateT (runReaderT runSwitch config) state
-            return ()
+    
+    fetchTid <- forkIO $ forever $ fetchMessage msgChan socket
+    
+    logChan <- atomically $ dupTChan msgChan
+    logTid <- forkIO $ forever $ logCommands logChan
+    
+    clTid <- forkIO $ repeatSend msgChan CheckLines 30
+    
+    swTid <- forkIO $ do
+        evalStateT (runReaderT runSwitch config) state
+    
+    return SwitchHandle { 
+            swChan = msgChan, 
+            swThreads = [ fetchTid, clTid, swTid, logTid ] }
+
+logCommands :: TChan SwitchCommand -> IO ()
+logCommands logChan = 
+    (atomically $ readTChan logChan) >>= logCommand
+
+logCommand :: SwitchCommand -> IO ()
+logCommand (ProcessTelex from len msg) = do
+    putStrLn $ "RECV FROM[" ++ (show from) 
+        ++ "][" ++ (show len) ++ "] " ++ (show msg)
+
+logCommand CheckLines = do
+    putStrLn "CHECK"
+
+logCommand ShutdownSwitch = do
+    putStrLn "SHUTDOWN"
+
+repeatSend :: TChan SwitchCommand -> SwitchCommand -> Int -> IO ()
+repeatSend chan cmd delay = do
+    threadDelay (delay*1000000)
+    atomically $ writeTChan chan cmd
+    repeatSend chan cmd delay
+
+stopSwitch :: SwitchHandle -> IO ()
+stopSwitch handle = do
+    atomically $ writeTChan (swChan handle) ShutdownSwitch
 
 runSwitch :: SwitchT ()
 runSwitch = do
     config <- ask
     state <- get
+    
+    let stateName = swStat state
+    
+    liftIO $ putStrLn $ "State: " ++ (show stateName)
     
     case swStat state of
         Shutdown -> do
@@ -189,20 +251,38 @@ runSwitch = do
             runSwitch
             
         _ -> do
-            telex <- liftIO $ atomically $ readTChan (swMsgChan state)
             
-            case swStat state of
-                Booting -> do
-                    completeBootstrap telex
-                    dispatchTelex telex
-                
-                Online -> do
-                    dispatchTelex telex
-                
-                _ -> do
-                    return ()
+            cmd <- liftIO $
+                atomically $ readTChan (swMsgChan state)
+            dispatchCommand cmd
             
             runSwitch
+
+dispatchCommand :: SwitchCommand -> SwitchT ()
+dispatchCommand (ProcessTelex a b c) = do
+    let telex = ProcessTelex a b c
+    state <- get
+    
+    case swStat state of
+        Booting -> do
+            completeBootstrap telex
+        
+        Online -> do
+            dispatchTelex telex
+            
+        _ -> do
+            return ()
+    
+dispatchCommand CheckLines = do
+    state <- get
+    
+    -- TODO: scan lines, update state
+    
+    return ()
+
+dispatchCommand ShutdownSwitch = do
+    state <- get
+    put $ state { swStat = Shutdown }
 
 startBootstrap :: SwitchT ()
 startBootstrap = do
@@ -215,15 +295,42 @@ startBootstrap = do
             ("+end", show $ hash endpoint),
             ("_to", show endpoint)]
     
-    put state { swStat=Booting }
+    put state { swStat = Booting }
 
-completeBootstrap :: RecvMsg -> SwitchT ()
-completeBootstrap telex = do
-    return ()
+completeBootstrap :: SwitchCommand -> SwitchT ()
+completeBootstrap processTelex = do
+    let telex = telexObj processTelex
+    state <- get
+    
+    case telexGet "_to" telex of
+        Just public -> do 
+            put state { swPublic = readEndpoint public, swStat = Online }
+            dispatchTelex processTelex
+        Nothing -> do
+            return ()
 
-dispatchTelex :: RecvMsg -> SwitchT ()
-dispatchTelex telex = do
-    return ()
+dispatchTelex :: SwitchCommand -> SwitchT ()
+dispatchTelex processTelex = do
+    let telex = telexObj processTelex
+--    seeNeighbors telex
+--    update
+    case fromJSON telex of
+        Just (JSObject telexMap) ->
+            mapM_ (dispatchField telex) (M.keys telexMap)
+        _ ->
+            return ()
+    
+--    let x = fromJSON telex
+--    case fromJSON telex of
+--        Just y ->
+--            liftIO $ putStrLn y
+--        Nothing ->
+--            return ()
+
+dispatchField :: JSValue -> ByteString -> SwitchT ()
+    
+dispatchField telex field = do
+    liftIO $ putStrLn $ "dispatchField " ++ (show field)
 
 -----------------------------------------------------------------------------
                           -- Telehash switch design --

@@ -11,25 +11,11 @@ import Network.Socket (Socket)
 
 import Telehash
 
-printRecvMsg logChan = do
-    (RecvMsg msg msgLen sockAddr) <- atomically $ readTChan logChan
-    putStrLn $ "RECV FROM[" ++ (show sockAddr) 
-        ++ "][" ++ (show msgLen) ++ "] " ++ (show msg)
-    
-    putStrLn $ "_to = " ++ 
-        case telexGet "_to" msg of
-            (Just to) -> to
-            Nothing -> "[undefined]"
-
 main = do
-    msgChan <- newTChanIO
-    logChan <- atomically $ dupTChan msgChan
-    
-    serverSocket <- bindServer $ Endpoint "0.0.0.0" 42425
-    
-    forkIO $ forever $ fetchMessage msgChan serverSocket
-    
-    forkIO $ forever $ printRecvMsg logChan
-    
-    startSwitch msgChan serverSocket
-    
+    let config = SwitchConfig {
+            swAddress = Endpoint "0.0.0.0" 42425,
+            swBootstrap = Endpoint "127.0.0.1" 42424
+        }
+
+    swHandle <- startSwitch config
+    return swHandle
