@@ -10,6 +10,8 @@ import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.State
 
+import System.Random
+
 import Data.Bits
 import Data.List
 import qualified Data.Map as M
@@ -32,6 +34,7 @@ import Text.JSON.AttoJSON as J
 import Text.ParserCombinators.Parsec
 
 data Endpoint = Endpoint String Int
+    deriving (Eq, Ord)
 
 instance Show Endpoint where
     show (Endpoint ipAddr port) = ipAddr ++ ":" ++ (show port)
@@ -59,6 +62,7 @@ data SwitchCommand = ProcessTelex {
         telexFrom :: Endpoint,
         telexLength :: Int,
         telexObj :: JSValue
+        
     }
     | CheckLines
     | ShutdownSwitch
@@ -260,18 +264,45 @@ runSwitch = do
             
             runSwitch
 
+updateLine :: Endpoint -> Int -> JSValue -> SwitchT ()
+updateLine from len obj = do
+    state <- get
+    let lines = swLines state
+    updatedLine <- case M.lookup from lines of
+        Just line -> do
+            return $ line {
+                lineBytesReceived = len + lineBytesReceived line
+            }
+        Nothing -> do
+            liftIO $ newLine from len
+    put state { swLines = M.insert from updatedLine lines }
+
+newLine :: Endpoint -> Int -> IO LineInfo
+newLine endpoint len = do
+    ringOut <- getStdRandom (randomR (1,32767))
+    return $ LineInfo {
+        lineEndpoint = endpoint,
+        lineEnd = hash endpoint,
+        lineBytesReceived = len,
+        lineBytesSent = 0,
+        lineRingOut = ringOut, -- you LIE!!!
+        lineProduct = 0,
+        lineNeighbors = []
+    }
+
 dispatchCommand :: SwitchCommand -> SwitchT ()
-dispatchCommand (ProcessTelex a b c) = do
-    let telex = ProcessTelex a b c
+dispatchCommand (ProcessTelex from len obj) = do
+    updateLine from len obj
     state <- get
     
+    let processTelex = ProcessTelex from len obj
     case swStat state of
         Booting -> do
-            completeBootstrap telex
+            completeBootstrap processTelex
         
         Online -> do
-            dispatchTelex telex
-            
+            dispatchTelex processTelex
+        
         _ -> do
             return ()
     
@@ -292,6 +323,9 @@ startBootstrap = do
     state <- get
     
     let endpoint = swBootstrap config
+    
+    --newLine state endpoint
+    
     liftIO $ sendMessage (swSocket state) $
         showJSON $ toJSON [
             ("+end", show $ hash endpoint),

@@ -1,0 +1,15 @@
+Name:                telehash
+Version:             0.0
+Description:         JSON+UDP+DHT=Freedom
+License:             PublicDomain
+License-file:        ../LICENSE
+Author:              Casey Marshall
+Maintainer:          casey.marshall@gmail.com
+Build-Type:          Simple
+Cabal-Version:       >=1.2
+
+Executable switch
+  Main-is:           Main.hs
+  Build-Depends:     base >= 3 && < 5, parsec, AttoJson, network, bytestring, 
+                     SHA, utf8-string, containers, mtl, stm, random
+
