@@ -58,13 +58,12 @@ parseEndpoint = do
     return $ Endpoint hostName (read port)
 
 data SwitchCommand = ProcessTelex {
-        
-        telexFrom :: Endpoint,
-        telexLength :: Int,
-        telexObj :: JSValue
-        
-    }
-    | CheckLines
+    
+    telexFrom :: Endpoint,
+    telexLength :: Int,
+    telexObj :: JSValue
+    
+}   | CheckLines
     | ShutdownSwitch
 
 data SwitchStatus = Offline | Booting | Online | Shutdown
@@ -78,16 +77,16 @@ data SwitchHandle = SwitchHandle {
 }
 
 data LineInfo = LineInfo {
-        
-        lineEndpoint        :: Endpoint,
-        lineEnd             :: Digest,
-        lineBytesReceived   :: Int,
-        lineBytesSent       :: Int,
-        lineRingOut         :: Int,
-        lineProduct         :: Int,
-        lineNeighbors       :: [Digest]
-        
-    }
+    
+    lineEndpoint        :: Endpoint,
+    lineEnd             :: Digest,
+    lineBytesReceived   :: Int,
+    lineBytesSent       :: Int,
+    lineRingOut         :: Int,
+    lineProduct         :: Maybe Int,
+    lineNeighbors       :: [Digest]
+    
+}
 
 data SwitchConfig = SwitchConfig {
     
@@ -193,12 +192,12 @@ startSwitch config = do
     socket <- bindServer $ swAddress config
     msgChan <- newTChanIO
     let state = SwitchState {
-            swStat  = Offline,
-            swLines = M.empty,
-            swPublic = Nothing,
-            swSocket = socket,
-            swMsgChan = msgChan
-        }
+        swStat  = Offline,
+        swLines = M.empty,
+        swPublic = Nothing,
+        swSocket = socket,
+        swMsgChan = msgChan
+    }
     
     fetchTid <- forkIO $ forever $ fetchMessage msgChan socket
     
@@ -211,8 +210,9 @@ startSwitch config = do
         evalStateT (runReaderT runSwitch config) state
     
     return SwitchHandle { 
-            swChan = msgChan, 
-            swThreads = [ fetchTid, clTid, swTid, logTid ] }
+        swChan = msgChan, 
+        swThreads = [ fetchTid, clTid, swTid, logTid ]
+    }
 
 logCommands :: TChan SwitchCommand -> IO ()
 logCommands logChan = 
@@ -258,8 +258,7 @@ runSwitch = do
             
         _ -> do
             
-            cmd <- liftIO $
-                atomically $ readTChan (swMsgChan state)
+            cmd <- liftIO $ atomically $ readTChan (swMsgChan state)
             dispatchCommand cmd
             
             runSwitch
@@ -268,14 +267,21 @@ updateLine :: Endpoint -> Int -> JSValue -> SwitchT ()
 updateLine from len obj = do
     state <- get
     let lines = swLines state
-    updatedLine <- case M.lookup from lines of
+    case M.lookup from lines of
         Just line -> do
-            return $ line {
+            let updatedLine = line {
                 lineBytesReceived = len + lineBytesReceived line
             }
+            put state { swLines = M.insert from updatedLine lines }
         Nothing -> do
-            liftIO $ newLine from len
-    put state { swLines = M.insert from updatedLine lines }
+            addLine from
+
+addLine :: Endpoint -> SwitchT ()
+addLine from = do
+    state <- get
+    let lines = swLines state
+    line <- liftIO $ newLine from 0
+    put state { swLines = M.insert from line lines }
 
 newLine :: Endpoint -> Int -> IO LineInfo
 newLine endpoint len = do
@@ -285,8 +291,8 @@ newLine endpoint len = do
         lineEnd = hash endpoint,
         lineBytesReceived = len,
         lineBytesSent = 0,
-        lineRingOut = ringOut, -- you LIE!!!
-        lineProduct = 0,
+        lineRingOut = ringOut,
+        lineProduct = Nothing,
         lineNeighbors = []
     }
 
@@ -324,7 +330,7 @@ startBootstrap = do
     
     let endpoint = swBootstrap config
     
-    --newLine state endpoint
+    addLine endpoint
     
     liftIO $ sendMessage (swSocket state) $
         showJSON $ toJSON [
