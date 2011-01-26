@@ -75,11 +75,13 @@ data SwitchHandle = SwitchHandle {
 
 data LineInfo = LineInfo {
         
-        lnEndP          :: Endpoint,
-        lnEndH          :: Digest,
-        lnBytesReceived :: Int,
-        lnRingIn        :: Int,
-        lnRingOut       :: Int
+        lineEndpoint        :: Endpoint,
+        lineEnd             :: Digest,
+        lineBytesReceived   :: Int,
+        lineBytesSent       :: Int,
+        lineRingOut         :: Int,
+        lineProduct         :: Int,
+        lineNeighbors       :: [Digest]
         
     }
 
