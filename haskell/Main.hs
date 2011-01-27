@@ -18,4 +18,5 @@ main = do
         }
 
     swHandle <- startSwitch config
-    return swHandle
+    interact id
+

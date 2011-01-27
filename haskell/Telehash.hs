@@ -82,6 +82,7 @@ data LineInfo = LineInfo {
     lineEnd             :: Digest,
     lineBytesReceived   :: Int,
     lineBytesSent       :: Int,
+    lineRingIn          :: Maybe Int,
     lineRingOut         :: Int,
     lineProduct         :: Maybe Int,
     lineNeighbors       :: [Digest]
@@ -166,15 +167,52 @@ fetchMessage msgChan sock = do
         Nothing ->
             error "fetch failed"
 
-sendMessage :: Socket -> B.ByteString -> IO ()
-sendMessage socket msg = do
-    let maybeEndpoint = 
-            readJSON msg >>= telexGet "_to" >>= readEndpoint
-    case maybeEndpoint of
-        Just endpoint ->
-            sendMessageTo socket msg endpoint
+telexFeed :: JSON a => String -> Maybe a -> JSValue -> JSValue
+telexFeed key maybeValue obj =
+    maybe obj (\value -> telexWith key value obj) maybeValue
+
+isValidProduct :: LineInfo -> Bool
+isValidProduct line =
+    case getProductMatch line of
+        Just productMatch ->
+            productMatch
         Nothing ->
-            error "send failed"
+            False
+    where
+    getProductMatch line = let
+        ringOut = lineRingOut line
+        in do
+        ringIn <- lineRingIn line
+        product <- lineProduct line
+        return $ product == (ringIn * ringOut)
+
+sendTelex :: JSValue -> SwitchT ()
+sendTelex telex = do
+    case return telex >>= telexGet "_to" >>= readEndpoint of
+        Just endpoint -> do
+            line <- updateLine endpoint 0 telex
+            let sendTelex = (telexFeed "_line" (validProduct line)) .
+                            (telexFeed "_ring" (necessaryRingOut line)) $
+                                telex
+            state <- get
+            liftIO $ 
+                sendMessageTo (swSocket state) (showJSON sendTelex) endpoint
+        Nothing -> do
+            return ()
+    
+    where
+    validProduct :: LineInfo -> Maybe Int
+    validProduct line = 
+        case isValidProduct line of
+            True -> lineProduct line
+            False -> Nothing
+    
+    necessaryRingOut :: LineInfo -> Maybe Int
+    necessaryRingOut line =
+        case isValidProduct line of
+            True -> Nothing
+            False -> Just $ lineRingOut line
+    
 
 sendMessageTo :: Socket -> B.ByteString -> Endpoint -> IO ()
 sendMessageTo socket msg (Endpoint hostName port) = do
@@ -263,18 +301,34 @@ runSwitch = do
             
             runSwitch
 
-updateLine :: Endpoint -> Int -> JSValue -> SwitchT ()
+-- Kind of like a flipped-around maybe function for
+-- conditionally modifying lines based on maybe a value.
+lineFeed :: Maybe a -> (LineInfo -> a -> LineInfo) -> LineInfo -> LineInfo
+lineFeed maybeValue nextLineF line =
+    maybe line (nextLineF line) maybeValue
+
+updateLine :: Endpoint -> Int -> JSValue -> SwitchT LineInfo
 updateLine from len obj = do
     state <- get
     let lines = swLines state
-    case M.lookup from lines of
-        Just line -> do
-            let updatedLine = line {
-                lineBytesReceived = len + lineBytesReceived line
+    line <- case M.lookup from lines of
+        Just matchLine -> do
+            return matchLine {
+                lineBytesReceived = len + lineBytesReceived matchLine
             }
-            put state { swLines = M.insert from updatedLine lines }
         Nothing -> do
-            addLine from
+            liftIO $ newLine from len
+    
+    -- How to abstract this structure with monads/combinators?
+    let newLine = (lineFeed (telexGet "_ring" obj)
+                    (\line ringIn -> line { 
+                        lineRingIn = Just ringIn } )) .
+                  (lineFeed (telexGet "_line" obj)
+                    (\line product -> line { 
+                        lineProduct = Just product } )) $ line
+    
+    put state { swLines = M.insert from newLine lines }
+    return newLine
 
 addLine :: Endpoint -> SwitchT ()
 addLine from = do
@@ -291,6 +345,7 @@ newLine endpoint len = do
         lineEnd = hash endpoint,
         lineBytesReceived = len,
         lineBytesSent = 0,
+        lineRingIn = Nothing,
         lineRingOut = ringOut,
         lineProduct = Nothing,
         lineNeighbors = []
@@ -332,8 +387,7 @@ startBootstrap = do
     
     addLine endpoint
     
-    liftIO $ sendMessage (swSocket state) $
-        showJSON $ toJSON [
+    sendTelex . toJSON $ [
             ("+end", show $ hash endpoint),
             ("_to", show endpoint)]
     
