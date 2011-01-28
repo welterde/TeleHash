@@ -24,6 +24,8 @@ import Data.Digest.Pure.SHA
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
+
+import Data.Time.Clock
  
 import Network.Socket hiding (recv, recvFrom, send, sendTo)
 import Network.Socket.ByteString (recvFrom, sendTo)
@@ -85,7 +87,11 @@ data LineInfo = LineInfo {
     lineRingIn          :: Maybe Int,
     lineRingOut         :: Int,
     lineProduct         :: Maybe Int,
-    lineNeighbors       :: [Digest]
+    lineNeighbors       :: [Digest],
+    
+    lineFirstSeenAt     :: UTCTime,
+    lineLastSeenAt      :: UTCTime,
+    lineLastCheckedAt   :: UTCTime
     
 }
 
@@ -190,13 +196,19 @@ sendTelex :: JSValue -> SwitchT ()
 sendTelex telex = do
     case return telex >>= telexGet "_to" >>= readEndpoint of
         Just endpoint -> do
-            line <- updateLine endpoint 0 telex
-            let sendTelex = (telexFeed "_line" (validProduct line)) .
-                            (telexFeed "_ring" (necessaryRingOut line)) $
-                                telex
+            line <- lookupLine endpoint
+            
+            let msg = showJSON $
+                        (telexFeed "_line" (validProduct line)) .
+                        (telexFeed "_ring" (necessaryRingOut line)) $
+                            telex
+            
+            updateLine $ line { 
+                lineBytesSent = (lineBytesSent line) + B.length msg
+            }
+            
             state <- get
-            liftIO $ 
-                sendMessageTo (swSocket state) (showJSON sendTelex) endpoint
+            liftIO $ sendMessageTo (swSocket state) msg endpoint
         Nothing -> do
             return ()
     
@@ -212,8 +224,7 @@ sendTelex telex = do
         case isValidProduct line of
             True -> Nothing
             False -> Just $ lineRingOut line
-    
-
+   
 sendMessageTo :: Socket -> B.ByteString -> Endpoint -> IO ()
 sendMessageTo socket msg (Endpoint hostName port) = do
     hostAddr <- quickSockAddr hostName port
@@ -307,39 +318,68 @@ lineFeed :: Maybe a -> (LineInfo -> a -> LineInfo) -> LineInfo -> LineInfo
 lineFeed maybeValue nextLineF line =
     maybe line (nextLineF line) maybeValue
 
-updateLine :: Endpoint -> Int -> JSValue -> SwitchT LineInfo
-updateLine from len obj = do
+-- Update a line with bytes received
+lineWithBr :: SwitchCommand -> LineInfo -> SwitchT LineInfo
+lineWithBr (ProcessTelex from len obj) line = do
+    return $ line {
+        lineBytesReceived = (lineBytesReceived line) + len
+    }
+
+-- Update a line with bytes received
+lineWithBsent :: Int -> LineInfo -> SwitchT LineInfo
+lineWithBsent bsent line = do
+    return $ line {
+        lineBytesSent = (lineBytesSent line) + bsent
+    }
+
+-- Update a line with current time.
+lineWithSeenAt :: SwitchCommand -> LineInfo -> SwitchT LineInfo
+lineWithSeenAt (ProcessTelex from len obj) line = do
+    now <- liftIO $ getCurrentTime
+    return $ line { lineLastSeenAt = now }
+
+-- Update a line with handshake info from incoming Telex.
+lineWithHandshake :: SwitchCommand -> LineInfo -> SwitchT LineInfo
+lineWithHandshake (ProcessTelex from len obj) line = do
+    return $ 
+        (lineFeed (telexGet "_ring" obj)
+            (\line ringIn -> line { 
+                lineRingIn = Just ringIn } )) .
+        (lineFeed (telexGet "_line" obj)
+            (\line product -> line { 
+                lineProduct = Just product } )) $
+            line
+
+lookupLine :: Endpoint -> SwitchT LineInfo
+lookupLine from = do
     state <- get
     let lines = swLines state
-    line <- case M.lookup from lines of
-        Just matchLine -> do
-            return matchLine {
-                lineBytesReceived = len + lineBytesReceived matchLine
-            }
+    case M.lookup from (swLines state) of
+        Just line -> do
+            return line
         Nothing -> do
-            liftIO $ newLine from len
-    
-    -- How to abstract this structure with monads/combinators?
-    let newLine = (lineFeed (telexGet "_ring" obj)
-                    (\line ringIn -> line { 
-                        lineRingIn = Just ringIn } )) .
-                  (lineFeed (telexGet "_line" obj)
-                    (\line product -> line { 
-                        lineProduct = Just product } )) $ line
-    
-    put state { swLines = M.insert from newLine lines }
-    return newLine
+            addLine from
 
-addLine :: Endpoint -> SwitchT ()
+updateLine :: LineInfo -> SwitchT LineInfo
+updateLine line = do
+    state <- get
+    put state {
+        swLines = M.insert (lineEndpoint line) line (swLines state)
+    }
+    return line
+
+addLine :: Endpoint -> SwitchT LineInfo
 addLine from = do
     state <- get
     let lines = swLines state
     line <- liftIO $ newLine from 0
     put state { swLines = M.insert from line lines }
+    return line
 
 newLine :: Endpoint -> Int -> IO LineInfo
 newLine endpoint len = do
     ringOut <- getStdRandom (randomR (1,32767))
+    now <- getCurrentTime
     return $ LineInfo {
         lineEndpoint = endpoint,
         lineEnd = hash endpoint,
@@ -348,15 +388,30 @@ newLine endpoint len = do
         lineRingIn = Nothing,
         lineRingOut = ringOut,
         lineProduct = Nothing,
-        lineNeighbors = []
+        lineNeighbors = [],
+        lineFirstSeenAt = now,
+        lineLastSeenAt = now,
+        lineLastCheckedAt = now
     }
 
+checkLine :: SwitchState -> LineInfo -> Bool
+checkLine state line = let
+    age = (lineLastCheckedAt line) `diffUTCTime` (lineFirstSeenAt line)
+    lastSeen = (lineLastCheckedAt line) `diffUTCTime` (lineLastSeenAt line)
+    in
+    isValidProduct line && (lastSeen < 120 || age < 60)
+    
 dispatchCommand :: SwitchCommand -> SwitchT ()
 dispatchCommand (ProcessTelex from len obj) = do
-    updateLine from len obj
     state <- get
-    
     let processTelex = ProcessTelex from len obj
+    
+    lookupLine from >>=
+        lineWithBr processTelex >>=
+        lineWithSeenAt processTelex >>=
+        lineWithHandshake processTelex >>=
+        updateLine
+    
     case swStat state of
         Booting -> do
             completeBootstrap processTelex
@@ -369,11 +424,14 @@ dispatchCommand (ProcessTelex from len obj) = do
     
 dispatchCommand CheckLines = do
     state <- get
+    now <- liftIO getCurrentTime
+    let withLastCheckTime = M.map (\line -> line { lineLastCheckedAt = now } )
+        filterValid = M.filter (checkLine state)
+    put state {
+        swLines = (withLastCheckTime . filterValid) (swLines state)
+    }
+    where
     
-    -- TODO: scan lines, update state
-    
-    return ()
-
 dispatchCommand ShutdownSwitch = do
     state <- get
     put $ state { swStat = Shutdown }
