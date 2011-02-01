@@ -93,7 +93,7 @@ data LineInfo = LineInfo {
     lineLastSeenAt      :: UTCTime,
     lineLastCheckedAt   :: UTCTime
     
-}
+} deriving (Show)
 
 data SwitchConfig = SwitchConfig {
     
@@ -190,7 +190,7 @@ isValidProduct line =
         in do
         ringIn <- lineRingIn line
         product <- lineProduct line
-        return $ product == (ringIn * ringOut)
+        return $ product `rem` ringOut == 0
 
 sendTelex :: JSValue -> SwitchT ()
 sendTelex telex = do
@@ -341,14 +341,30 @@ lineWithSeenAt (ProcessTelex from len obj) line = do
 -- Update a line with handshake info from incoming Telex.
 lineWithHandshake :: SwitchCommand -> LineInfo -> SwitchT LineInfo
 lineWithHandshake (ProcessTelex from len obj) line = do
-    return $ 
-        (lineFeed (telexGet "_ring" obj)
+    return $ (lineWithRingOut . lineDeriveRingIn . lineWithProduct) line
+    
+    where
+    
+    lineWithRingOut line = 
+        lineFeed (telexGet "_ring" obj)
             (\line ringIn -> line { 
-                lineRingIn = Just ringIn } )) .
-        (lineFeed (telexGet "_line" obj)
-            (\line product -> line { 
-                lineProduct = Just product } )) $
-            line
+                lineRingIn = Just ringIn } ) line
+    
+    lineDeriveRingIn line = line {
+        lineRingIn = case lineRingIn line of
+            Just ringIn ->
+                return ringIn
+            Nothing -> let
+                ringOut = lineRingOut line
+                in do
+                product <- lineProduct line
+                return $ product `quot` ringOut
+    }
+    
+    lineWithProduct line =
+        lineFeed (telexGet "_line" obj)
+            (\line product -> line {
+                lineProduct = Just product } ) line
 
 lookupLine :: Endpoint -> SwitchT LineInfo
 lookupLine from = do
@@ -394,13 +410,29 @@ newLine endpoint len = do
         lineLastCheckedAt = now
     }
 
+lineAge :: LineInfo -> NominalDiffTime
+lineAge line = (lineLastCheckedAt line) `diffUTCTime` (lineFirstSeenAt line)
+
+lineLastSeen :: LineInfo -> NominalDiffTime
+lineLastSeen line = (lineLastCheckedAt line) `diffUTCTime` (lineLastSeenAt line)
+
 checkLine :: SwitchState -> LineInfo -> Bool
 checkLine state line = let
-    age = (lineLastCheckedAt line) `diffUTCTime` (lineFirstSeenAt line)
-    lastSeen = (lineLastCheckedAt line) `diffUTCTime` (lineLastSeenAt line)
+    age = lineAge line
+    lastSeen = lineLastSeen line
     in
-    isValidProduct line && (lastSeen < 120 || age < 60)
+    (isValidProduct line && (lastSeen < 300)) || age < 60
     
+keepaliveLine :: SwitchState -> LineInfo -> SwitchT ()
+keepaliveLine state line = 
+    case swPublic state of
+        Just selfEndpoint -> do
+            sendTelex . toJSON $ [
+                    ("+end", show $ hash selfEndpoint),
+                    ("_to", show $ lineEndpoint line)]
+        Nothing -> do
+            return ()
+
 dispatchCommand :: SwitchCommand -> SwitchT ()
 dispatchCommand (ProcessTelex from len obj) = do
     state <- get
@@ -427,11 +459,16 @@ dispatchCommand CheckLines = do
     now <- liftIO getCurrentTime
     let withLastCheckTime = M.map (\line -> line { lineLastCheckedAt = now } )
         filterValid = M.filter (checkLine state)
-    put state {
-        swLines = (withLastCheckTime . filterValid) (swLines state)
-    }
-    where
+    let updatedLines = (withLastCheckTime . filterValid . swLines) state
     
+    put state {
+        swLines = updatedLines
+    }
+    
+    mapM_ (keepaliveLine state) $ M.elems updatedLines
+    
+    liftIO $ putStrLn $ "LINES:" ++ (show $ swLines state)
+
 dispatchCommand ShutdownSwitch = do
     state <- get
     put $ state { swStat = Shutdown }
@@ -439,17 +476,18 @@ dispatchCommand ShutdownSwitch = do
 startBootstrap :: SwitchT ()
 startBootstrap = do
     config <- ask
-    state <- get
     
     let endpoint = swBootstrap config
-    
     addLine endpoint
+    
+    state <- get
+    put state { swStat = Booting }
     
     sendTelex . toJSON $ [
             ("+end", show $ hash endpoint),
             ("_to", show endpoint)]
     
-    put state { swStat = Booting }
+    return ()
 
 completeBootstrap :: SwitchCommand -> SwitchT ()
 completeBootstrap processTelex = do
