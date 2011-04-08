@@ -265,7 +265,7 @@ Switch.prototype.startBootstrap = function(){
         else {
             self.scanlines();
             self.taptap();
-            self.startBootstrap(seed);
+            self.send(bootTelex);
         }
     }, 10000);
     
