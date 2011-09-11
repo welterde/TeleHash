@@ -4,6 +4,7 @@ var crypto = require("crypto");
 var dgram = require("dgram");
 var dns = require("dns");
 
+
 /*
  * Some generally useful functions.
  */
@@ -196,8 +197,9 @@ exports.createSwitch = function(bindPort, bootHost, bootPort) {
  * The switch will start listening on its bind port 
  * and start the bootstrap process.
  */
-Switch.prototype.start = function() {
+Switch.prototype.start = function(callback) {
     var self = this;
+    self.callback = callback;
     self.server.bind(self.bindPort);
 }
 
@@ -212,6 +214,7 @@ Switch.prototype.stop = function() {
 Switch.prototype.addTap = function(tap) {
     var self = this;
     self.taps[self.taps.length] = tap;
+    console.log("Taps: "+JSON.stringify(self.taps));
 }
 
 Switch.prototype.taptap = function() {
@@ -251,7 +254,7 @@ Switch.prototype.taptap = function() {
 Switch.prototype.startBootstrap = function(){
     var self = this;
     var seed = self.bootEndpoint;
-    //console.log(["SEEDING[", seed, "]"].join(""));
+    console.log(["SEEDING[", seed, "]"].join(""));
     var line = self.getline(seed);
     var bootTelex = new Telex(seed);
     bootTelex["+end"] = line.end; // any end will do, might as well ask for their neighborhood
@@ -281,7 +284,8 @@ Switch.prototype.completeBootstrap = function(remoteipp, telex) {
     self.selfipp = telex._to;
     self.selfhash = new Hash(self.selfipp).toString();
     
-    //console.log(["\tSELF[", telex._to, " = ", self.selfhash, "]"].join(""));
+    console.log(["\tSELF[", telex._to, " = ", self.selfhash, "]"].join(""));
+    
     
     var line = self.getline(self.selfipp);
     line.visible = 1; // flag ourselves as default visible
@@ -298,10 +302,13 @@ Switch.prototype.completeBootstrap = function(remoteipp, telex) {
             clearInterval(scanID);
         }
         else {
+            
             self.scanlines();
             self.taptap();
         }
     }, 10000);
+    
+    self.callback();
     
 }
 
@@ -410,7 +417,7 @@ Switch.prototype.onSignal_end = function(remoteipp, telex, line) {
         var vis = line.visible ? remoteipp : self.selfipp; // start from a visible switch (should use cached result someday)
         var hashes = self.near_to(end, vis); // get closest hashes (of other switches)
         
-//      console.log("+end hashes: " + JSON.stringify(hashes));
+     //console.log("+end hashes: " + JSON.stringify(hashes));
         
         // convert back to IPPs
         var ipps = {};
@@ -425,11 +432,14 @@ Switch.prototype.onSignal_end = function(remoteipp, telex, line) {
             ipps[self.selfipp] = line.visibled = 1; // mark ourselves visible at least once
         }
         
+        //console.log("ipps: "+JSON.stringify(ipps));
         var ippKeys = keys(ipps);
+        //console.log("ippKeys: "+ippKeys);
         if (ippKeys.length) {
             var telexOut = new Telex(remoteipp);
             var seeipps = ippKeys.filter(function(ipp){ return ipp.length > 1 });
             telexOut[".see"] = seeipps;
+            //console.log("telexOut: "+JSON.stringify(telexOut));
             self.send(telexOut);
         }
     }
