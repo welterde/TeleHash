@@ -10,7 +10,12 @@
 """Naive TeleHash implementation
 
 It works only in part. Documentation is still completely missing.
-Using this is completely up to you."""
+Using this is completely up to you.
+
+Most of the output of the program comes to a file "switch.log",
+which includes traces for the main data structures and telexes
+sent/received.
+"""
 
 # Use logging and configure it to the more verbose level
 import logging

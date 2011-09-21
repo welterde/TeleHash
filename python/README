@@ -1,6 +1,8 @@
 jgb's Python TeleHash implementation
 ====================================
 
+Note: this does not refer to telehash.py, also in this directory, but only to switch,py and testing scripts (test_.py).
+
 This is only a first try at having a TeleHash implementation written in Python. It is still not complete, many parts may not work, and lacks documentation. Please, use only at your own risk.
 
 See below some information about the implementation, and about how I understood the TeleHash protocol.
