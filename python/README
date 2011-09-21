@@ -1,0 +1,191 @@
+jgb's Python TeleHash implementation
+====================================
+
+This is only a first try at having a TeleHash implementation written in Python. It is still not complete, many parts may not work, and lacks documentation. Please, use only at your own risk.
+
+See below some information about the implementation, and about how I understood the TeleHash protocol.
+
+Comments: jgb@gsyc.es
+
+Licensing terms
+---------------
+
+This is free software, distributed under the terms of
+the GNU General Public License Version 3, or any later version.
+See the COPYING file included in this archive
+
+
+Some references worth reading
+-----------------------------
+
+These are references I read before or while writing the code.
+
+* Kademlia: A Peer-to-peer Information System Based on the XOR Metric
+http://pdos.csail.mit.edu/~petar/papers/maymounkov-kademlia-lncs.pdf
+
+* Distributed Hash Tables (part 2)
+http://offthelip.org/?p=157
+Explanation of Kademlia's routing table
+
+* Peer Routing Table
+http://tutorials.jenkov.com/p2p/peer-routing-table.html
+Good tutorial to the basics of maintaining Kademlia's routing table, entering the network, leaving it, etc.
+
+* Distributed Hash Tables, Part I
+http://www.linuxjournal.com/article/6797
+Intro to DHTs (simple, easy to understand) Includes simple, yet complete, Python code to implement a simple DHT.
+
+* Blog posts by Jeremy Miller
+http://scattered-thoughts.net/one/1300/366038/597949
+http://scattered-thoughts.net/one/1300/995285/442278
+http://scattered-thoughts.net/one/1301/8124/662205
+http://scattered-thoughts.net/one/1301/514243/595154
+About his implementation of TeleHash in Erlang. Includes some implementation details woth reading.
+
+* Kademlia article in Wikipedia
+http://en.wikipedia.org/wiki/Kademlia#Routing_tables
+
+* Kademlia, a design specification
+http://xlattice.sourceforge.net/components/protocol/kademlia/specs.html
+Good and comprehensive specification of Kademlia protocol, in some aspects easier to understand and more detailed than the Kademlia paper itself.
+
+Handshake with any switch (IPP)
+-------------------------------
+
+An important part of the protocol is how to get started to exchange telexes with another TeleHash switch. In other words, how to have a line (and exchange _line fields in telexes) with it. Find below a state-transition description of how I understand this phase. It seems to work, and seems to interoperate with other implementations of TeleHash, but still needs some polishing and discussion.
+
+States: Unknown, Opening, Ringing, Line
+
+State Unknown:
+
+  * Description: Still don't know about IPP.
+
+  * Actions, data:
+      - IPP not in list{}
+
+  * Change to other states:
+      - To Opening if (any of the following):
+           . I get any telex from IPP
+           . I get any telex including IPP and want to communicate (eg, +pop)
+           . I learn in some other way of IPP and want to communicate (eg, application)
+                 FIXME: This latter is really a case?
+
+State Opening:
+
+  * Description: I know about IPP and want to exchange telexes with it
+
+  * Init:
+      - Entry for IPP in list{}
+      - Create a random list[IPP].myRing
+
+  * Actions, data:
+      - Add _ring (with list[IPP].myRing) to any outgoing telex to IPP
+      - Send periodic _ring to IPP (to improve chances of getting _line from it)
+      - Do not accept telexes from IPP FIXME: Really?
+
+  * Change to other states
+      - To Ringing if:
+           . I get a telex with _ring from IPP
+                 (this could be the message that moved me to Opening state)
+      - To Line if (all of the following):
+           . I get a telex with _line from IPP
+	         (this could be the message that moved me to Opening state)
+	   . The received _line is multiple of list[IPP].myRing
+
+State Ringing:
+
+  * Description: I know IPP's ring, and therefore line with it, accept telexes
+
+  * Init:
+      - Store list[IPP].partnerRing
+      - Create list[IPP].line (as product of myRing and partnerRing)
+
+  * Actions, data:
+      - Add _line to any telext to IPP
+      - Send periodic _line to IPP (to improve chances of getting _line from it)
+      - Check any incoming telex with partnerRing (should have a _ring, and be valid)
+      - Accept telexes from IPP if they passed the previous check
+
+  * Change to other states
+      - To Line if (all of the following):
+            . I get a telex with _line from IPP
+      	    . The received _line is list[IPP].line
+
+State Line:
+
+  * Description: I have line with IPP, and know that IPP knows it, accept telexes
+
+  * Init:
+      - Store list[IPP].partnerRing (if not previously stored)
+      - Store list[IPP].line
+
+  * Actions, data:
+      - Add _line to any telext to IPP
+      - Check any incoming telex with partnerRing (should have a _ring, and be valid,
+          or a _line, and be valid)
+      - Accept telexes from IPP if they passed the previous check
+      - Note: No need to send periodic _line because I'm sure IPP is in State Line.
+
+General note: I'm alive telexes to IPP.
+
+     It is important to keep resending _ring or _line telexes to IPP only until I'm sure IPP is in State Line, which is when I get a _line from it. This means that when I'm in State Line, I'm sure the other party doesn't need those messages to know about the line, because I already got a _line from it.
+
+     Of course, from that point on, regular messages sent to IPP will also carry _line, but it should not be needed to "maintain" the line. However, to keep NATs open and to let the other party know I'm alive, I can send periodic messages, but that has nothing to do with this handshake (see I'm alive telexes).
+
+     However, during all three States (Opening, Ringing and Line), i have to keep resending "empty" telexes if there is no outgoing activity in the line (if there is, sent telexes will carry _ring or _line fields, so no need of extra telexes).
+
+     For keeping track of this, I can use a timestamp, lines[IPP].lastSent (to be updated eg. each time a new telex is sent to IPP). The period of inactivity raising an empty telex can vary from the Opening and Ringing State (when I'm intestested in a fast handshake) to the Line State (when I'm only interested in keeping NATs open and showing life).
+
+FIXME: How to detect that a switch rebooted, and probably is now sending telexes with a different _ring?
+
+
+Data structure and procedures for the routing table
+---------------------------------------------------
+
+The routing table is built with a binary tree which has as leaves lists of Ends.
+
+The binary tree is structured according to the binary prefixes of the Ends. Following the tree from the root, means following the first (most significative) bits of the Ends.
+
+This has several interesting proprierties when XOR is used as a distance. Each branch "opens" a new range for distances. For instance, when the tree has only two branches (prefixes "0" and "1"), any two Ends in the same branch are separated by at most 2^159. In other words, the closer End in the "0" branch to any End in the "1" branch is separated by a distance of at least 2^159.
+
+This important proprierty comes from the fact that when the distance between two ends is calculated, XOR is used. If we calculate the distance between an End starting with 1, and another one starting with 0, the distance will always start with 1 (followed by 159 bits), since it will be XOR(0,1). If we calculate the distance "inside" the "1" branch, it will always start with 0 (followed by 159 bits), since XOR(1,1)=0. The same happens "inside" the "0" branch: XOR(0,0)=0.
+
+This happens at any level of the tree. Given a subtree rooted at any prefix, all Ends in that subtree will be closest among them than with any other End outside the subtree.
+
+This propierty is combined with how Ends are selected in Kademlia to become a part of the routing table. At each level of the tree, we're interested in maintaining only one leaf (which will hold a bucket with 20 Ends) in the far end of the distances (considering with respect to the End of the switch maintaining the tree). This means that we will maintaing much more Ends close to us than far away.
+
+With this information, it can be easy to understand how the tree is built and evolved. Let's consider that MyEnd is the End of the switch we're considering. This switch starts with a tree with only two buckets, for prefixes (branches) "0" and "1". Each new End known is stored in one of those buckets, according to its most significative bit. When each of the buckets becomes full (20 Ends), different things happen:
+
+- For the bucket further away from myEnd, new ends are simply discarded: we won't maintain a lot of information about far zones of the ring.
+
+- For the bucket closer to myEnd, when it becomes full it is split in two new buckets (two new branches). For example, let's consider that the closer bucket is "1", the new branches (prefixes) will be "10" and "11". The Ends previously in "1" will be assigned, according to their prefix, to "10" and "11", and the bucket for "1" will be discarded. From this point on, we will have three buckets (branches) in the tree: "0" (which won't be split), "10" and "11".
+
+Fortunately, it is easy to know which is the furthest or closest bucket: it will be the one with the same prefix as MyEnd.
+
+The process of never splitting the furthest bucket and splitting the closest bucket when it becomes full goes on during all the life of the switch. This will produce one bucket at each level of the tree, except for the lower one. That is, we will have one bucket for prefixes of length 1 ("0" or "1"), one bucket for prefixes of length 2 (in the previous example, it will be either "10" or "11", depending on the prefix of MyEnd), one at length 3, and so on, until the lnger prefix in use, which will have two buckets.
+
+For convenience, this binary tree is in fact maintained as a dictionary, branches, with each element of the dictionary being a list of Ends (a bucket). Keys in the dictionary are prefixes. Therefore, at a given point in time, we could have:
+
+branches = {"0": [End1, End2, ....], # no more than 20 Ends, maybe less
+	    "10": [End21, End22 ...], # no more than 20 Ends, maybe less
+	    "111": [End41, End42 ...], # no more than 20 Ends, maybe less
+	    ..
+            "110..1": [Endx1, Endx2 ...], # no more than 20 Ends, probably less
+	    "110..0": [Endy1, Endy2 ...], # no more than 20 Ends, probably less
+	    }
+
+In this example, myEnd would start by "110..", since that is the prefix that has been split, and therfore should be closest to myend.
+
+For convenience, each prefix (eg, "01") is stored as a pair of two integers: the prefix itself, and the number of significative bits of that prefix (to diferentiate "0" from "00" or "000", for instance, which will be (0,1), (0,2) and (0,3)).
+
+In addition to the branches{} dictionary, a list kBuckets is maintained, as a way of knowning, quickly, which branch corresponds to a given End. Please notice that this is not easy in branches{}, since for a given End, all prefixes (that is, prefixese with all bit lenghts) are potential keys for End. To negotiate this problem, kBuckets maintains an entry per each range of distances to myEnd. So, position 0 in kBuckets is for Ends with distance larger than 2^159 to myEnd. Position 1 is for Ends with distnace between 2^158 and 2^159-1, and so on. Each position in kBuckets stores the prefix of the corresponding bucket (which can be used as key in branches{}).
+
+When the branches{} tree is started with branches "0" and "1", and assuming "0" is the furthest bucket to myEnd, kBuckets will be like this:
+
+kBuckets = ["0", "1", ...., "1"] # 160 entries
+
+When "1" is split, assuming "10" is the furthest branch, kBuckets will be like this:
+
+kBuckets = ["0", "10", "11", "11"...., "11"] # 160 entries
+
+
