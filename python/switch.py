@@ -670,7 +670,8 @@ class TeleHashSwitch(DatagramProtocol):
             # There is some extra content to fill in
             for field in content.keys():
                 self.toSend[to][field] = content[field]
-        logging.debug("Telex to send %s: %s." % (str(to), str(self.toSend[to])))
+        logging.debug("Telex to send to %s:" % IPPToString(to))
+        logging.debug("  %s." % str(self.toSend[to]))
         #logging.debug("Telexes ready to send now %s." % (str(self.toSend)))
 
     def sendToSend (self):
@@ -688,7 +689,8 @@ class TeleHashSwitch(DatagramProtocol):
         """
 
         telexJSON = encode_json(self.toSend[to], separators=(',',':'))
-        logging.info("Sending telex to %s: %s." % (IPPToString(to), telexJSON))
+        logging.info("Sending telex to %s:" % IPPToString(to))
+        logging.info("  %s." % telexJSON)
         try:
             self.transport.write(telexJSON, to)
             self.lines[to]['bs'] += len(telexJSON)
@@ -709,7 +711,8 @@ class TeleHashSwitch(DatagramProtocol):
             return
         self.recvDatagramsNo = self.recvDatagramsNo + 1
         self.toSend = {}
-        logging.info("Received from %s:%d: %s." % (host, port, data))
+        logging.info("Received from %s:" % IPPToString(fromIPP))
+        logging.info("  %s." % data)
         #logging.debug("Telex as dictionary: %s." % recvTelex.str())
         recvTelex.parse()
         #logging.debug( "Telex parsed: %s." % recvTelex.str_parsed())
