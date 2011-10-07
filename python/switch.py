@@ -452,11 +452,13 @@ class TeleHashSwitch(DatagramProtocol):
         # When to show some stats
         self.lastStats = 0
 
-        # Switches for which I have inteterest in communcation (and keeping a line)
+        # Switches for which I have inteterest in communcation
+        # (and keeping a line)
         # Dictionary keyed by IPP. Each entry contains a dictionary with fields:
         #  . state: 'line' Line State, _line received, established line
         #           'ringing' Ringing State, _ring received, but not established line yet
         #           'opening' Opening State, no _ring or _line received yet
+        #  . end: End id for this IPP
         #  . myRing: ring number I used to establish the line
         #  . partnerRing: ring number the other party proposed
         #  . line: line number (for convenience)
@@ -481,8 +483,22 @@ class TeleHashSwitch(DatagramProtocol):
         """Print the content of lines"""
 
         for ipp in self.lines.keys():
-            logging.info('Lines [%s]: %s' % (IPPToString(ipp), str(self.lines[ipp])))
-
+            logging.info(' Lines [%s]:' % IPPToString(ipp))
+            logging.info('  state: %s' % self.lines[ipp]['state'])
+            logging.info('  end: %s' % longToHex(self.lines[ipp]['end']))
+            logging.info('  line: %d, myRing: %d, partnerRing: %d' %
+                         (self.lines[ipp]['line'],
+                          self.lines[ipp]['myRing'],
+                          self.lines[ipp]['partnerRing']))
+            logging.info('  br: %d, bs: %d, tr: %d, ts: %d' % 
+                         (self.lines[ipp]['br'], self.lines[ipp]['bs'],
+                          self.lines[ipp]['tr'], self.lines[ipp]['ts']))
+            logging.info('  lastSent: %s' %
+                         time.ctime(self.lines[ipp]['lastSent']))
+            logging.info('  lineOpen: %s' % 
+                         time.ctime(self.lines[ipp]['lineOpen']))
+            logging.info('  lastSeen: %s' %
+                         time.ctime(self.lines[ipp]['lastSeen']))
 
     # Telexes buffered to send (usually as a result of sending a message, or doing
     #   some housekeeping). They are still not send waiting for (maybe) new fields
@@ -553,6 +569,7 @@ class TeleHashSwitch(DatagramProtocol):
 
         myRing = random.randint(1, 32768)
         self.lines[ipp] = {'state': 'opening',
+                           'end': IPPToLongEnd(ipp),
                            'myRing': myRing,
                            'partnerRing': 0,
                            'line': 0,
