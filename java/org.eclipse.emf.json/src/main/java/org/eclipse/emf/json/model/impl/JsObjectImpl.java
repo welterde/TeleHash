@@ -7,6 +7,8 @@
 package org.eclipse.emf.json.model.impl;
 
 import org.eclipse.emf.common.notify.NotificationChain;
+import org.eclipse.emf.common.util.BasicEList;
+import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.EMap;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EStructuralFeature;
@@ -14,6 +16,7 @@ import org.eclipse.emf.ecore.InternalEObject;
 import org.eclipse.emf.ecore.impl.EObjectImpl;
 import org.eclipse.emf.ecore.util.EcoreEMap;
 import org.eclipse.emf.ecore.util.InternalEList;
+import org.eclipse.emf.json.JsonMetadata;
 import org.eclipse.emf.json.model.JsObject;
 import org.eclipse.emf.json.model.JsonPackage;
 
@@ -75,12 +78,42 @@ public class JsObjectImpl extends EObjectImpl implements JsObject {
 	/**
 	 * <!-- begin-user-doc -->
 	 * <!-- end-user-doc -->
-	 * @generated
+	 * @generated NOT
 	 */
 	public Object get(String key) {
-		// TODO: implement this method
-		// Ensure that you remove @generated or mark it @generated NOT
-		throw new UnsupportedOperationException();
+		EStructuralFeature feature = JsonMetadata.INSTANCE.getJsonFeature(key, eClass());
+		if (feature != null) {
+			return eGet(feature);
+		}
+		return getUnmatched().get(key);
+	}
+
+	/**
+	 * <!-- begin-user-doc -->
+	 * <!-- end-user-doc -->
+	 * @generated NOT
+	 */
+	public EList<String> getFieldNames() {
+		BasicEList<String> result = new BasicEList<String>();
+		result.addAll(JsonMetadata.INSTANCE.getJsonFeatures(eClass()).keySet());
+		result.addAll(getUnmatched().keySet());
+		return result;
+	}
+
+	/**
+	 * <!-- begin-user-doc -->
+	 * <!-- end-user-doc -->
+	 * @generated NOT
+	 */
+	public JsObject with(String key, Object value) {
+		EStructuralFeature feature = JsonMetadata.INSTANCE.getJsonFeature(key, eClass());
+		if (feature != null) {
+			eSet(feature, value);
+		}
+		else {
+			getUnmatched().put(key, value);
+		}
+		return this;
 	}
 
 	/**
